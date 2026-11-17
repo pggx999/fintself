@@ -123,6 +123,40 @@ except Exception as e:
 
 ```
 
+## Transferencias (experimental)
+
+Fintself puede hacer transferencias en CLP a un destinatario **ya registrado** en la web del banco. Hoy solo está disponible para Banco Bice (`cl_bice`), y sus selectores aún deben verificarse contra el sitio real (ver más abajo).
+
+```bash
+# 1. Dry run (por defecto): llega a la pantalla de confirmación del banco,
+#    verifica que coincida con lo pedido y se detiene. No envía nada.
+fintself transfer cl_bice --rut 12.345.678-5 --account 000123456789 --amount 1000 --debug
+
+# 2. Envío real: muestra el resumen del banco, pide que escribas el monto
+#    exacto para confirmar y luego espera tu segundo factor (app o clave).
+fintself transfer cl_bice --rut 12.345.678-5 --account 000123456789 --amount 1000 --execute
+```
+
+Protecciones:
+
+- **Dry run por defecto**: sin `--execute` nunca se presiona el botón final.
+- **Verificación del resumen**: antes de enviar, se lee la pantalla de confirmación del banco y se compara monto, RUT y cuenta con lo pedido. Si algo no coincide o no se puede leer, se cancela.
+- **Confirmación explícita**: debes escribir el monto exacto en la terminal.
+- **Límite por transferencia**: `FINTSELF_TRANSFER_MAX_AMOUNT` (por defecto 50.000 CLP). Montos mayores se rechazan antes de abrir el navegador.
+- **Anti-duplicados**: cada intento queda en `~/.fintself/transfers.jsonl` (cuentas enmascaradas). Una transferencia idéntica en las últimas 24 horas se bloquea salvo que uses `--allow-duplicate`.
+- **Segundo factor manual**: nunca se automatiza; lo apruebas tú.
+- **Estado desconocido**: si tras enviar no se puede leer el comprobante, el comando termina con código 3 y te pide revisar la cartola. No reintentes sin revisar.
+
+### Ajustar los selectores de un banco
+
+Los selectores de `fintself/scrapers/cl/bice_transfer.py` (`SELECTORS`) son una primera aproximación. Para ajustarlos:
+
+```bash
+uv run python tutorials/capture_transfer_flow.py cl_bice
+```
+
+El script inicia sesión y te deja el navegador. Recorre la transferencia a mano y presiona Enter en cada pantalla para guardar captura y HTML en `debug_output/cl_bice/`. **Detente en la pantalla de confirmación sin presionar el botón final.** Los archivos contienen datos personales: revísalos y censúralos antes de compartirlos.
+
 ## Depuración (Debugging)
 
 Si un scraper falla o necesitas ver qué está pasando, puedes activar el modo de depuración. Esto ejecutará el navegador en modo visible (no headless) y guardará capturas de pantalla y el contenido HTML de los pasos clave del proceso.
