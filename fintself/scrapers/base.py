@@ -3,7 +3,8 @@ import os
 import random
 import time
 from abc import ABC, abstractmethod
-from typing import List, Literal, Optional, Union
+from contextlib import contextmanager
+from typing import Iterator, List, Literal, Optional, Union
 
 from playwright.sync_api import (
     Browser,
@@ -17,7 +18,7 @@ from playwright.sync_api import (
 )
 
 from fintself import settings
-from fintself.core.exceptions import DataExtractionError, LoginError
+from fintself.core.exceptions import DataExtractionError, LoginError, TransferError
 from fintself.core.models import MovementModel
 from fintself.utils.logging import logger
 
@@ -319,14 +320,13 @@ class BaseScraper(ABC):
         except Exception as e:
             logger.warning(f"Could not save HTML for {step_name}: {e}")
 
-    def scrape(self, user: str, password: str) -> List[MovementModel]:
-        """
-        Executes the entire scraping process: starts the browser,
-        logs in, and extracts the data.
-        """
-        self.user = user
-        self.password = password
+    @contextmanager
+    def _browser_session(self) -> Iterator[Page]:
+        """Launches the browser, yields a ready page and always closes it.
 
+        On LoginError/DataExtractionError (or any unexpected error) a debug
+        snapshot is saved before the exception propagates.
+        """
         with sync_playwright() as p:
             self.playwright = p
             try:
@@ -350,26 +350,15 @@ class BaseScraper(ABC):
                 self.page = context.new_page()
                 self.page.set_default_timeout(self.default_timeout)
 
-                logger.info(f"Logging into {self._get_bank_id()}...")
-                self._login()
-                logger.info(f"Successfully logged into {self._get_bank_id()}.")
+                yield self.page
 
-                logger.info(f"Extracting movements from {self._get_bank_id()}...")
-                movements = self._scrape_movements()
-                logger.info(
-                    f"Extraction of {len(movements)} movements completed for {self._get_bank_id()}."
-                )
-
-                return movements
-
-            except (LoginError, DataExtractionError):
+            except (LoginError, DataExtractionError, TransferError):
                 if self.page:
                     self._save_debug_info("scraping_error")
                 raise
             except Exception as e:
                 logger.error(
-                    f"Unexpected error during scraping for {self._get_bank_id()}: {e}",
-                    exc_info=True,
+                    f"Unexpected error during session for {self._get_bank_id()}: {e}"
                 )
                 if self.page:
                     self._save_debug_info("unexpected_error")
@@ -378,4 +367,24 @@ class BaseScraper(ABC):
                 if self.browser:
                     self.browser.close()
                     logger.info(f"Browser closed for {self._get_bank_id()}.")
-        return []
+
+    def scrape(self, user: str, password: str) -> List[MovementModel]:
+        """
+        Executes the entire scraping process: starts the browser,
+        logs in, and extracts the data.
+        """
+        self.user = user
+        self.password = password
+
+        with self._browser_session():
+            logger.info(f"Logging into {self._get_bank_id()}...")
+            self._login()
+            logger.info(f"Successfully logged into {self._get_bank_id()}.")
+
+            logger.info(f"Extracting movements from {self._get_bank_id()}...")
+            movements = self._scrape_movements()
+            logger.info(
+                f"Extraction of {len(movements)} movements completed for {self._get_bank_id()}."
+            )
+
+            return movements

@@ -5,6 +5,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from fintself.core.rut import is_valid_rut, normalize_rut
+
 AccountType = Literal["corriente", "credito", "debito", "prepago"]
 
 
@@ -64,3 +66,84 @@ class MovementModel(BaseModel):
                 },
             }
         }
+
+
+def _mask_account(account: Optional[str]) -> Optional[str]:
+    if not account:
+        return account
+    return f"****{account[-4:]}"
+
+
+class TransferRequest(BaseModel):
+    """A transfer in CLP to a recipient already registered in the bank's website."""
+
+    destination_rut: str = Field(..., description="Recipient RUT, e.g. 12.345.678-5.")
+    destination_account: str = Field(
+        ..., description="Recipient account number (digits only after validation)."
+    )
+    amount: Decimal = Field(..., description="Amount in CLP. Whole pesos, > 0.")
+    message: Optional[str] = Field(
+        None, max_length=100, description="Optional comment sent with the transfer."
+    )
+
+    @field_validator("destination_rut")
+    @classmethod
+    def _validate_rut(cls, v: str) -> str:
+        if not is_valid_rut(v):
+            raise ValueError(f"Invalid RUT: '{v}'")
+        return normalize_rut(v)  # type: ignore[return-value]
+
+    @field_validator("destination_account")
+    @classmethod
+    def _validate_account(cls, v: str) -> str:
+        digits = re.sub(r"\D", "", v)
+        if len(digits) < 4:
+            raise ValueError("Account number must have at least 4 digits.")
+        return digits
+
+    @field_validator("amount")
+    @classmethod
+    def _validate_amount(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("Amount must be greater than zero.")
+        if v != v.to_integral_value():
+            raise ValueError("CLP amounts must be whole pesos.")
+        return v
+
+    def masked(self) -> dict:
+        """Representation safe to log."""
+        return {
+            "destination_rut": self.destination_rut,
+            "destination_account": _mask_account(self.destination_account),
+            "amount": str(self.amount),
+        }
+
+
+class TransferSummary(BaseModel):
+    """What the bank shows on its confirmation screen, read before submitting."""
+
+    amount: Optional[Decimal] = None
+    destination_rut: Optional[str] = None
+    destination_account: Optional[str] = Field(
+        None, description="Digits as shown by the bank; may be only the last ones."
+    )
+    destination_name: Optional[str] = None
+    destination_bank: Optional[str] = None
+    origin_account: Optional[str] = None
+    raw_data: dict = Field(default_factory=dict)
+
+
+TransferStatus = Literal["dry_run", "completed"]
+
+
+class TransferResult(BaseModel):
+    """Outcome of a transfer run."""
+
+    status: TransferStatus
+    request: TransferRequest
+    summary: TransferSummary
+    receipt_id: Optional[str] = Field(
+        None, description="Bank's operation or receipt number, when shown."
+    )
+    executed_at: Optional[datetime] = None
+    raw_data: dict = Field(default_factory=dict)

@@ -38,3 +38,16 @@ SCRAPER_MIN_HUMAN_DELAY_MS = float(
 SCRAPER_MAX_HUMAN_DELAY_MS = float(
     os.getenv("SCRAPER_MAX_HUMAN_DELAY_MS", "800.0")
 )  # ms
+
+# Transfers
+# Hard upper limit (CLP) for a single transfer made by fintself. Requests above
+# it are rejected before the browser opens.
+FINTSELF_TRANSFER_MAX_AMOUNT = int(os.getenv("FINTSELF_TRANSFER_MAX_AMOUNT", "50000"))
+# Local journal of transfer attempts, used to block accidental duplicates.
+FINTSELF_TRANSFER_JOURNAL = os.path.expanduser(
+    os.getenv("FINTSELF_TRANSFER_JOURNAL", "~/.fintself/transfers.jsonl")
+)
+# Window (hours) in which an identical transfer is treated as a duplicate.
+FINTSELF_TRANSFER_DUPLICATE_WINDOW_HOURS = int(
+    os.getenv("FINTSELF_TRANSFER_DUPLICATE_WINDOW_HOURS", "24")
+)

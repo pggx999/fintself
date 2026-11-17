@@ -4,8 +4,12 @@ from typing import Optional
 
 import typer
 from dotenv import load_dotenv
-from fintself.core.exceptions import FintselfException
+from pydantic import ValidationError
+
+from fintself.core.exceptions import FintselfException, TransferStatusUnknown
+from fintself.core.models import TransferRequest, TransferSummary
 from fintself.scrapers import get_scraper, list_available_scrapers
+from fintself.transfers import SecondFactorChallenge, get_transferer
 from fintself.utils.logging import logger
 from fintself.utils.output import (
     get_output_data,
@@ -154,6 +158,137 @@ def scrape_bank_command(
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=debug_mode)
         raise typer.Exit(code=1)
+
+
+def _get_credentials(bank_id: str):
+    prefix = bank_id.upper().replace("-", "_")
+    user = os.getenv(f"{prefix}_USER") or typer.prompt(f"Usuario para {bank_id}")
+    password = os.getenv(f"{prefix}_PASSWORD") or getpass(f"Password for {bank_id}: ")
+    return user, password
+
+
+def _print_summary(request: TransferRequest, summary: TransferSummary) -> None:
+    typer.echo("")
+    typer.secho("Resumen mostrado por el banco:", bold=True)
+    rows = [
+        (
+            "Monto",
+            f"${int(summary.amount):,}".replace(",", ".") if summary.amount else "-",
+        ),
+        ("Destinatario", summary.destination_name or "-"),
+        ("RUT", summary.destination_rut or "-"),
+        ("Banco", summary.destination_bank or "-"),
+        ("Cuenta destino", summary.destination_account or "-"),
+        ("Cuenta origen", summary.origin_account or "-"),
+    ]
+    for label, value in rows:
+        typer.echo(f"  {label:<15} {value}")
+    if request.message:
+        typer.echo(f"  {'Mensaje':<15} {request.message}")
+    typer.echo("")
+
+
+def _confirm_transfer(request: TransferRequest, summary: TransferSummary) -> bool:
+    _print_summary(request, summary)
+    typed = typer.prompt(
+        f"Para enviar, escribe el monto exacto ({int(request.amount)}). "
+        "Cualquier otra cosa cancela",
+        default="",
+        show_default=False,
+    )
+    return typed.strip() == str(int(request.amount))
+
+
+def _second_factor(challenge: SecondFactorChallenge):
+    if challenge.kind == "code":
+        return getpass(f"{challenge.message} ")
+    typer.prompt(
+        f"{challenge.message} Presiona Enter cuando la hayas aprobado",
+        default="",
+        show_default=False,
+    )
+    return None
+
+
+@app.command(name="transfer")
+def transfer_command(
+    bank_id: str = typer.Argument(..., help="Bank identifier (e.g.: cl_bice)."),
+    rut: str = typer.Option(..., "--rut", help="Recipient RUT (e.g.: 12.345.678-5)."),
+    account: str = typer.Option(..., "--account", help="Recipient account number."),
+    amount: int = typer.Option(..., "--amount", help="Amount in CLP, whole pesos."),
+    message: Optional[str] = typer.Option(
+        None, "--message", help="Optional comment for the recipient."
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Actually send the transfer. Without it, runs a dry run that stops "
+        "on the bank's confirmation screen.",
+    ),
+    allow_duplicate: bool = typer.Option(
+        False,
+        "--allow-duplicate",
+        help="Allow a transfer identical to one attempted recently.",
+    ),
+    debug_mode: Optional[bool] = typer.Option(
+        None, "--debug/--no-debug", show_default=False
+    ),
+    headless: Optional[bool] = typer.Option(
+        None, "--headless/--no-headless", show_default=False
+    ),
+):
+    """
+    Transfers CLP to a recipient already registered in the bank's website.
+
+    Dry run by default. With --execute it asks you to type the amount after
+    showing the bank's confirmation screen, then waits for your second factor.
+    """
+    try:
+        request = TransferRequest(
+            destination_rut=rut,
+            destination_account=account,
+            amount=amount,
+            message=message,
+        )
+    except ValidationError as e:
+        for err in e.errors():
+            logger.error(f"{err['loc'][0]}: {err['msg']}")
+        raise typer.Exit(code=1)
+
+    try:
+        transferer = get_transferer(bank_id, headless=headless, debug_mode=debug_mode)
+        transferer.check_request(
+            request, dry_run=not execute, allow_duplicate=allow_duplicate
+        )
+        user, password = _get_credentials(bank_id)
+        result = transferer.transfer(
+            user,
+            password,
+            request,
+            confirm=_confirm_transfer,
+            second_factor=_second_factor,
+            dry_run=not execute,
+            allow_duplicate=allow_duplicate,
+        )
+    except TransferStatusUnknown as e:
+        logger.critical(str(e))
+        raise typer.Exit(code=3)
+    except FintselfException as e:
+        logger.error(f"Transfer not sent: {e}")
+        raise typer.Exit(code=1)
+
+    if result.status == "dry_run":
+        _print_summary(request, result.summary)
+        typer.secho(
+            "Dry run OK: el resumen coincide. No se envió nada. "
+            "Repite con --execute para transferir.",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        typer.secho(
+            f"Transferencia enviada. Comprobante: {result.receipt_id or 'no disponible'}",
+            fg=typer.colors.GREEN,
+        )
 
 
 if __name__ == "__main__":
